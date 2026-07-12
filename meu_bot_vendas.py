@@ -21,7 +21,6 @@ def manter_online():
     t.start()
 
 # --- CÓDIGO DO BOT ---
-# Puxa o token de forma segura das configurações do Render
 TOKEN_BOT = os.getenv("DISCORD_TOKEN")
 
 class MeuBot(discord.Client):
@@ -41,6 +40,10 @@ canal_logs_id = None
 mensagem_automatica_task = None
 carrinhos_aguardando_pix = {} 
 dados_carrinhos = {} 
+
+# Controle de alertas no PV
+carrinhos_ativos_alerta = set()
+dono_viu_notificacao = False
 
 config_painel = {
     "titulo": "Produto à Venda",
@@ -63,6 +66,28 @@ async def enviar_log(guild, mensagem_embed):
 @bot.event
 async def on_ready():
     print(f"🟢 {bot.user.name} está rodando com todas as funções atualizadas!")
+
+@bot.event
+async def on_message(message):
+    global dono_viu_notificacao
+    # Se o dono mandar mensagem pro bot na DM, para os alertas
+    if message.guild is None and message.author.id in donos_permitidos:
+        dono_viu_notificacao = True
+
+# Loop para ficar perturbando no PV de 5 em 5 segundos
+async def alertar_dono_no_pv(canal_nome):
+    global dono_viu_notificacao
+    dono_viu_notificacao = False
+    
+    # Pega a conta do primeiro dono configurado
+    dono_id = donos_permitidos[0]
+    try:
+        dono = await bot.fetch_user(dono_id)
+        while len(carrinhos_ativos_alerta) > 0 and not dono_viu_notificacao:
+            await dono.send(f"⚠️ **EI ACORDA!** Tem carrinho aberto aguardando atendimento: `{canal_nome}`!\n*Envie qualquer mensagem aqui para parar o alerta.*")
+            await asyncio.sleep(5)
+    except Exception as e:
+        print(f"Erro ao enviar mensagem no PV: {e}")
 
 # ================= COMANDOS ADMINISTRATIVOS =================
 
@@ -195,6 +220,7 @@ async def aprovar(interaction: discord.Interaction, produto: str):
     async def fechar_carrinho_5min():
         await asyncio.sleep(300)
         try:
+            carrinhos_ativos_alerta.discard(canal_id)
             dados_carrinhos.pop(canal_id, None)
             await interaction.channel.delete()
         except: pass
@@ -252,12 +278,25 @@ class BotaoAbrirCarrinho(discord.ui.View):
         
         dados_carrinhos[canal_carrinho.id] = {"cliente_id": interaction.user.id, "qtd": 1}
 
+        # Envia a marcação do Everyone no canal criado
+        await canal_carrinho.send("@everyone")
+
         embed_carrinho = discord.Embed(
             title="🛒 Painel do Carrinho",
             description="Use os botões abaixo para gerenciar seu pedido.\n\n📦 **Quantidade atual:** `1x`",
             color=discord.Color.light_grey()
         )
         await canal_carrinho.send(embed=embed_carrinho, view=InterfaceCarrinho(interaction.user.id))
+
+        # LOG DE ABERTURA DE CARRINHO
+        embed_log = discord.Embed(title="🛒 CARRINHO ABERTO", color=discord.Color.blue(), timestamp=datetime.now())
+        embed_log.add_field(name="Cliente", value=interaction.user.mention)
+        embed_log.add_field(name="Canal", value=canal_carrinho.mention)
+        await enviar_log(guild, embed_log)
+
+        # Inicia o loop de perturbar no PV do Dono
+        carrinhos_ativos_alerta.add(canal_carrinho.id)
+        asyncio.create_task(alertar_dono_no_pv(canal_carrinho.name))
 
 class ModalQuantidade(discord.ui.Modal, title="Escolha a Quantidade"):
     quantidade_input = discord.ui.TextInput(label="Quantos itens você quer?", placeholder="Ex: 5", min_length=1, max_length=3)
@@ -303,7 +342,14 @@ class InterfaceCarrinho(discord.ui.View):
         async def aguardar_envio_pix():
             await asyncio.sleep(120) 
             if not carrinhos_aguardando_pix.get(canal_id, True):
-                try: await interaction.channel.delete()
+                try: 
+                    carrinhos_ativos_alerta.discard(canal_id)
+                    # LOG DE FECHAMENTO AUTOMÁTICO
+                    embed_log = discord.Embed(title="⏰ CARRINHO FECHADO (EXPIRADO)", color=discord.Color.orange(), timestamp=datetime.now())
+                    embed_log.add_field(name="Canal", value=f"`{interaction.channel.name}`")
+                    await enviar_log(interaction.guild, embed_log)
+                    
+                    await interaction.channel.delete()
                 except: pass
         asyncio.create_task(aguardar_envio_pix())
 
@@ -316,11 +362,20 @@ class InterfaceCarrinho(discord.ui.View):
 
     @discord.ui.button(label="CANCELA", style=discord.ButtonStyle.danger, custom_id="btn_cancelar_compra")
     async def cancela(self, interaction: discord.Interaction, button: discord.ui.Button):
+        canal_id = interaction.channel.id
+        carrinhos_ativos_alerta.discard(canal_id)
+        
+        # LOG DE CANCELAMENTO MANUAL
+        embed_log = discord.Embed(title="❌ CARRINHO CANCELADO", color=discord.Color.red(), timestamp=datetime.now())
+        embed_log.add_field(name="Quem cancelou", value=interaction.user.mention)
+        embed_log.add_field(name="Canal", value=f"`{interaction.channel.name}`")
+        await enviar_log(interaction.guild, embed_log)
+
         await interaction.response.send_message("❌ Cancelando e fechando...")
         await asyncio.sleep(2)
         try: await interaction.channel.delete()
         except: pass
 
 if __name__ == "__main__":
-    manter_online() # Liga o servidor web falso
+    manter_online() 
     bot.run(TOKEN_BOT)
