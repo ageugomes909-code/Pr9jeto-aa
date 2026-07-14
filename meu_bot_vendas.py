@@ -43,7 +43,6 @@ dados_carrinhos = {}
 
 # Controle de alertas no PV
 carrinhos_ativos_alerta = set()
-dono_viu_notificacao = False
 
 config_painel = {
     "titulo": "Produto à Venda",
@@ -69,22 +68,19 @@ async def on_ready():
 
 @bot.event
 async def on_message(message):
-    global dono_viu_notificacao
-    # Se o dono mandar mensagem pro bot na DM, para os alertas
-    if message.guild is None and message.author.id in donos_permitidos:
-        dono_viu_notificacao = True
+    # Se o dono responder no canal do carrinho, para os alertas daquele carrinho específico
+    if message.guild and message.author.id in donos_permitidos:
+        if message.channel.id in carrinhos_ativos_alerta:
+            carrinhos_ativos_alerta.discard(message.channel.id)
 
-# Loop para ficar perturbando no PV de 5 em 5 segundos
-async def alertar_dono_no_pv(canal_nome):
-    global dono_viu_notificacao
-    dono_viu_notificacao = False
-    
-    # Pega a conta do primeiro dono configurado
+# Loop para ficar alertando no PV de 5 em 5 segundos
+async def alertar_dono_no_pv(canal_id, canal_nome):
     dono_id = donos_permitidos[0]
     try:
         dono = await bot.fetch_user(dono_id)
-        while len(carrinhos_ativos_alerta) > 0 and not dono_viu_notificacao:
-            await dono.send(f"⚠️ **EI ACORDA!** Tem carrinho aberto aguardando atendimento: `{canal_nome}`!\n*Envie qualquer mensagem aqui para parar o alerta.*")
+        # O loop roda enquanto o carrinho estiver na lista de alertas ativos
+        while canal_id in carrinhos_ativos_alerta:
+            await dono.send(f"⚠️ **EI ACORDA!** Tem carrinho aberto aguardando atendimento: `{canal_nome}`!\n*Envie uma mensagem no canal do carrinho para parar este alerta.*")
             await asyncio.sleep(5)
     except Exception as e:
         print(f"Erro ao enviar mensagem no PV: {e}")
@@ -177,7 +173,7 @@ async def mandar_pix(interaction: discord.Interaction, chave: str = None):
     total_pagar = config_painel["preco"] * qtd
     
     await interaction.response.send_message("✅ PIX enviado!", ephemeral=True)
-    await interaction.channel.send(f"⚠️ **AVISO:** Seu pedido expira em **30 MINUTOS**.\n\n📊 **RESUMO INTELIGENTE:**\n📦 **Quantidade:** {qtd}x\n💰 **Valor Total:** R$ `{total_pagar:.2f}`\n\n🔑 **Chave PIX:** `{chave_usar}`\n\n*entrega automático.*")
+    await interaction.channel.send(f"⚠️ **AVISO:** Seu pedido está pronto.\n\n📊 **RESUMO INTELIGENTE:**\n📦 **Quantidade:** {qtd}x\n💰 **Valor Total:** R$ `{total_pagar:.2f}`\n\n🔑 **Chave PIX:** `{chave_usar}`\n\n*entrega automática.*")
 
 @bot.tree.command(name="aprovar", description="Aprova a compra deste carrinho, baixa o estoque do painel e entrega o produto.")
 async def aprovar(interaction: discord.Interaction, produto: str):
@@ -202,8 +198,8 @@ async def aprovar(interaction: discord.Interaction, produto: str):
     else:
         config_painel["estoque"] = 0
 
-    await interaction.response.send_message(f"✅ Venda aprovada! O estoque do painel foi updated.")
-    await interaction.channel.send(f"🎉 **COMPRA APROVADA!!** O produto foi enviado na DM de {cliente.mention}! Obrigado pela preferência! ✨\n\n⏳ *O carrinho fecha em 5 minutos.*")
+    await interaction.response.send_message(f"✅ Venda aprovada! O estoque do painel foi atualizado.")
+    await interaction.channel.send(f"🎉 **COMPRA APROVADA!!** O produto foi enviado na DM de {cliente.mention}! Obrigado pela preferência! ✨\n\n⏳ *O carrinho fechará em breve.*")
     
     try:
         await cliente.send(f"🎁 **Sua compra foi aprovada!**\n📦 Aqui está seu produto:\n`{produto}`")
@@ -217,14 +213,14 @@ async def aprovar(interaction: discord.Interaction, produto: str):
     embed_log.add_field(name="Estoque Restante no Painel", value=f"`{config_painel['estoque']}`")
     await enviar_log(interaction.guild, embed_log)
 
-    async def fechar_carrinho_5min():
-        await asyncio.sleep(300)
+    async def fechar_carrinho_breve():
+        await asyncio.sleep(10)
         try:
             carrinhos_ativos_alerta.discard(canal_id)
             dados_carrinhos.pop(canal_id, None)
             await interaction.channel.delete()
         except: pass
-    asyncio.create_task(fechar_carrinho_5min())
+    asyncio.create_task(fechar_carrinho_breve())
 
 @bot.tree.command(name="anuncio_auto", description="Loop de anúncios que se auto-apagam de 3 em 3 horas.")
 async def anuncio_auto(interaction: discord.Interaction, canal: discord.TextChannel, mensagem: str, status: str):
@@ -294,9 +290,9 @@ class BotaoAbrirCarrinho(discord.ui.View):
         embed_log.add_field(name="Canal", value=canal_carrinho.mention)
         await enviar_log(guild, embed_log)
 
-        # Inicia o loop de perturbar no PV do Dono
+        # Inicia o loop de alertas no PV do Dono
         carrinhos_ativos_alerta.add(canal_carrinho.id)
-        asyncio.create_task(alertar_dono_no_pv(canal_carrinho.name))
+        asyncio.create_task(alertar_dono_no_pv(canal_carrinho.id, canal_carrinho.name))
 
 class ModalQuantidade(discord.ui.Modal, title="Escolha a Quantidade"):
     quantidade_input = discord.ui.TextInput(label="Quantos itens você quer?", placeholder="Ex: 5", min_length=1, max_length=3)
@@ -338,20 +334,7 @@ class InterfaceCarrinho(discord.ui.View):
         await interaction.response.send_message("⏳ *Aguarde uns instantes gerando PIX...*")
         canal_id = interaction.channel.id
         carrinhos_aguardando_pix[canal_id] = False 
-
-        async def aguardar_envio_pix():
-            await asyncio.sleep(120) 
-            if not carrinhos_aguardando_pix.get(canal_id, True):
-                try: 
-                    carrinhos_ativos_alerta.discard(canal_id)
-                    # LOG DE FECHAMENTO AUTOMÁTICO
-                    embed_log = discord.Embed(title="⏰ CARRINHO FECHADO (EXPIRADO)", color=discord.Color.orange(), timestamp=datetime.now())
-                    embed_log.add_field(name="Canal", value=f"`{interaction.channel.name}`")
-                    await enviar_log(interaction.guild, embed_log)
-                    
-                    await interaction.channel.delete()
-                except: pass
-        asyncio.create_task(aguardar_envio_pix())
+        carrinhos_ativos_alerta.discard(canal_id)
 
     @discord.ui.button(label="🔢 QUANTIDADE", style=discord.ButtonStyle.primary, custom_id="btn_mudar_quantidade")
     async def mudar_qtd(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -379,3 +362,4 @@ class InterfaceCarrinho(discord.ui.View):
 if __name__ == "__main__":
     manter_online() 
     bot.run(TOKEN_BOT)
+
