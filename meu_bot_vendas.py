@@ -7,14 +7,16 @@ from threading import Thread
 import os
 
 # --- SISTEMA DE WEB SERVER PARA O RENDER NÃO CAIR ---
-app = Flask('')
+app = Flask(__name__)
 
 @app.route('/')
 def home():
     return "Bot Online!"
 
 def run():
-    app.run(host='0.0.0.0', port=8080)
+    # Pega a porta automática fornecida pelo Render ou usa 8080 por padrão
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
 
 def manter_online():
     t = Thread(target=run)
@@ -68,17 +70,16 @@ async def on_ready():
 
 @bot.event
 async def on_message(message):
-    # Se o dono responder no canal do carrinho, para os alertas daquele carrinho específico
+    # Se o dono responder dentro do canal do carrinho, para os alertas daquele carrinho
     if message.guild and message.author.id in donos_permitidos:
         if message.channel.id in carrinhos_ativos_alerta:
             carrinhos_ativos_alerta.discard(message.channel.id)
 
-# Loop para ficar alertando no PV de 5 em 5 segundos
+# Loop de notificação insistente no PV do dono
 async def alertar_dono_no_pv(canal_id, canal_nome):
     dono_id = donos_permitidos[0]
     try:
         dono = await bot.fetch_user(dono_id)
-        # O loop roda enquanto o carrinho estiver na lista de alertas ativos
         while canal_id in carrinhos_ativos_alerta:
             await dono.send(f"⚠️ **EI ACORDA!** Tem carrinho aberto aguardando atendimento: `{canal_nome}`!\n*Envie uma mensagem no canal do carrinho para parar este alerta.*")
             await asyncio.sleep(5)
@@ -103,10 +104,10 @@ async def status_vendas(interaction: discord.Interaction, status: str):
         return
     if status.lower() == "upando":
         status_sistema = "upando"
-        await interaction.response.send_message("⚠️ Bot travado! Compras desativadas.")
+        await interaction.response.send_message("⚠️ Bot travado! Compras desativadas.", ephemeral=True)
     else:
         status_sistema = "normal"
-        await interaction.response.send_message("✅ Bot liberado! Compras normais.")
+        await interaction.response.send_message("✅ Bot liberado! Compras normais.", ephemeral=True)
 
 @bot.tree.command(name="painel_config", description="Configura o painel principal.")
 async def painel_config(interaction: discord.Interaction, titulo: str, descricao: str, estoque: int, preco: float, foto: str = None):
@@ -198,7 +199,7 @@ async def aprovar(interaction: discord.Interaction, produto: str):
     else:
         config_painel["estoque"] = 0
 
-    await interaction.response.send_message(f"✅ Venda aprovada! O estoque do painel foi atualizado.")
+    await interaction.response.send_message(f"✅ Venda aprovada! O estoque do painel foi atualizado.", ephemeral=True)
     await interaction.channel.send(f"🎉 **COMPRA APROVADA!!** O produto foi enviado na DM de {cliente.mention}! Obrigado pela preferência! ✨\n\n⏳ *O carrinho fechará em breve.*")
     
     try:
@@ -222,28 +223,59 @@ async def aprovar(interaction: discord.Interaction, produto: str):
         except: pass
     asyncio.create_task(fechar_carrinho_breve())
 
-@bot.tree.command(name="anuncio_auto", description="Loop de anúncios que se auto-apagam de 3 em 3 horas.")
+@bot.tree.command(name="anuncio_auto", description="Loop de anúncios que se auto-apagam e enviam 1 única mensagem a cada 3 horas.")
 async def anuncio_auto(interaction: discord.Interaction, canal: discord.TextChannel, mensagem: str, status: str):
     global mensagem_automatica_task
     if not tem_permissao(interaction):
         await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
         return
 
+    # Cancelar anúncio ativo
     if status.lower() == "desativar":
-        if mensagem_automatica_task:
+        if mensagem_automatica_task and not mensagem_automatica_task.done():
             mensagem_automatica_task.cancel()
-            await interaction.response.send_message("🛑 Divulgação automática parada.")
+            mensagem_automatica_task = None
+            await interaction.response.send_message("🛑 Divulgação automática parada com sucesso.", ephemeral=True)
+        else:
+            await interaction.response.send_message("⚠️ Não há nenhum anúncio automático ativo no momento.", ephemeral=True)
         return
 
-    await interaction.response.send_message(f"🔄 Anúncio automático configurado em {canal.mention}.")
+    # Cancela task anterior se já existir uma rodando antes de criar a nova
+    if mensagem_automatica_task and not mensagem_automatica_task.done():
+        mensagem_automatica_task.cancel()
 
-    async def loop():
+    await interaction.response.send_message(f"🔄 Anúncio automático configurado em {canal.mention}!", ephemeral=True)
+
+    async def loop_anuncio():
+        msg_anterior = None
         while True:
-            msg = await canal.send(mensagem)
-            await asyncio.sleep(10800) 
-            try: await msg.delete()
-            except: pass
-    mensagem_automatica_task = asyncio.create_task(loop())
+            try:
+                # Deleta a mensagem anterior antes de postar a nova
+                if msg_anterior:
+                    try: await msg_anterior.delete()
+                    except: pass
+
+                # Embed Profissional de Anúncio
+                embed_anuncio = discord.Embed(
+                    title="📢 MENSAGEM DO SISTEMA",
+                    description=mensagem,
+                    color=discord.Color.gold(),
+                    timestamp=datetime.now()
+                )
+                embed_anuncio.set_footer(text="Anúncio Automático • Atualizado a cada 3 horas")
+
+                msg_anterior = await canal.send(embed=embed_anuncio)
+                await asyncio.sleep(10800)  # Espera exatamente 3 horas (10800 segundos)
+            except asyncio.CancelledError:
+                if msg_anterior:
+                    try: await msg_anterior.delete()
+                    except: pass
+                break
+            except Exception as e:
+                print(f"Erro no anúncio automático: {e}")
+                await asyncio.sleep(60)
+
+    mensagem_automatica_task = asyncio.create_task(loop_anuncio())
 
 # ================= INTERFACES E BOTÕES =================
 
@@ -274,7 +306,7 @@ class BotaoAbrirCarrinho(discord.ui.View):
         
         dados_carrinhos[canal_carrinho.id] = {"cliente_id": interaction.user.id, "qtd": 1}
 
-        # Envia a marcação do Everyone no canal criado
+        # Notifica o Everyone no canal do carrinho recém-criado
         await canal_carrinho.send("@everyone")
 
         embed_carrinho = discord.Embed(
@@ -290,7 +322,7 @@ class BotaoAbrirCarrinho(discord.ui.View):
         embed_log.add_field(name="Canal", value=canal_carrinho.mention)
         await enviar_log(guild, embed_log)
 
-        # Inicia o loop de alertas no PV do Dono
+        # Inicia os alertas no PV do dono
         carrinhos_ativos_alerta.add(canal_carrinho.id)
         asyncio.create_task(alertar_dono_no_pv(canal_carrinho.id, canal_carrinho.name))
 
@@ -362,4 +394,3 @@ class InterfaceCarrinho(discord.ui.View):
 if __name__ == "__main__":
     manter_online() 
     bot.run(TOKEN_BOT)
-
