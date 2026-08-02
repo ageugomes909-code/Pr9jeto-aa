@@ -51,9 +51,8 @@ carrinhos_ativos_alerta = set()
 
 historico_vendas = []  
 
-canal_anuncio_id = None
-texto_anuncio_auto = None
-msg_anuncio_anterior = None
+# Configuração de Auto Reação
+canais_reacao_auto = {} # canal_id -> emoji
 
 # DICIONÁRIO DE TEXTOS DO SISTEMA
 mensagens_sistema = {
@@ -105,41 +104,25 @@ async def enviar_log(guild, mensagem_embed):
         if canal:
             await canal.send(embed=mensagem_embed)
 
-async def atualizar_embed_painel_especifico(guild, msg_id):
-    if msg_id in paineis_produtos:
-        p_info = paineis_produtos[msg_id]
-        try:
-            canal = guild.get_channel(p_info["canal_id"])
-            if canal:
-                msg = await canal.fetch_message(msg_id)
-                embed = discord.Embed(title=p_info["titulo"], description=p_info["descricao"], color=discord.Color.blue())
-                embed.add_field(name="📦 Estoque", value=f"`{p_info['estoque']}` disponíveis", inline=True)
-                embed.add_field(name="💵 Valor Unitário", value=f"R$ `{p_info['preco']:.2f}`", inline=True)
-                if p_info["foto"]:
-                    embed.set_image(url=p_info["foto"])
-                await msg.edit(embed=embed, view=BotaoAbrirCarrinho())
-        except Exception as e:
-            print(f"Erro ao atualizar painel {msg_id}: {e}")
-
 @bot.event
 async def on_ready():
-    print(f"🟢 {bot.user.name} online. Operando de forma bruta e direta.")
+    print(f"🟢 {bot.user.name} online e otimizado.")
 
 @bot.event
 async def on_message(message):
-    global msg_anuncio_anterior
     if message.author.id == bot.user.id: return
+
+    # Auto Reação em canais configurados
+    if message.channel.id in canais_reacao_auto:
+        emoji = canais_reacao_auto[message.channel.id]
+        try:
+            await message.add_reaction(emoji)
+        except Exception as e:
+            print(f"Erro ao reagir automaticamente: {e}")
 
     if message.guild and message.author.id in donos_permitidos:
         if message.channel.id in carrinhos_ativos_alerta:
             carrinhos_ativos_alerta.discard(message.channel.id)
-
-    if canal_anuncio_id and message.channel.id == canal_anuncio_id and texto_anuncio_auto:
-        if msg_anuncio_anterior:
-            try: await msg_anuncio_anterior.delete()
-            except: pass
-        embed_anuncio = discord.Embed(description=texto_anuncio_auto, color=discord.Color.gold(), timestamp=datetime.now())
-        msg_anuncio_anterior = await message.channel.send(embed=embed_anuncio, view=ViewMensagemAutomatica())
 
 async def alertar_dono_no_pv(canal_id, canal_nome):
     dono_id = donos_permitidos[0]
@@ -152,22 +135,38 @@ async def alertar_dono_no_pv(canal_id, canal_nome):
     except Exception as e:
         pass
 
-# ================= COMANDO: EDIÇÃO DE PAINEL DIRETA (SEM MODAL, COM EMOJIS NATIVOS) =================
+# ================= COMANDO: REAÇÃO AUTOMÁTICA =================
 
-@bot.tree.command(name="editar_painel", description="Edita o painel direto pelo comando (suporta emojis nativos do Discord).")
+@bot.tree.command(name="reag_auto", description="Configura um canal para o bot reagir automaticamente em todas as mensagens.")
+@app_commands.describe(canal="Canal alvo", emoji="Emoji que será usado nas reações")
+async def reag_auto(interaction: discord.Interaction, canal: discord.TextChannel, emoji: str):
+    if not tem_permissao(interaction):
+        await interaction.response.send_message(mensagens_sistema["sem_permissao"], ephemeral=True)
+        return
+
+    canais_reacao_auto[canal.id] = emoji
+    await interaction.response.send_message(f"✅ Auto-reação ativada no canal {canal.mention} com o emoji {emoji}!", ephemeral=True)
+
+# ================= COMANDO: EDIÇÃO AUTOMÁTICA POR ID =================
+
+@bot.tree.command(name="editar_painel", description="Edita qualquer mensagem/painel instantaneamente informando o ID.")
 @app_commands.describe(
-    msg_id="ID da mensagem do painel que quer editar", 
-    campo="Qual parte do painel você vai mudar?", 
-    novo_valor="O novo texto/valor (jogue os emojis aqui)"
+    msg_id="ID da mensagem que deseja editar", 
+    novo_titulo="Novo título do embed (opcional)",
+    nova_descricao="Nova descrição do embed (opcional)",
+    novo_estoque="Novo valor de estoque (opcional)",
+    novo_preco="Novo preço unitário (opcional)",
+    nova_foto="Novo link de imagem (opcional)"
 )
-@app_commands.choices(campo=[
-    app_commands.Choice(name="Título", value="titulo"),
-    app_commands.Choice(name="Descrição", value="descricao"),
-    app_commands.Choice(name="Estoque", value="estoque"),
-    app_commands.Choice(name="Preço", value="preco"),
-    app_commands.Choice(name="Foto", value="foto")
-])
-async def editar_painel(interaction: discord.Interaction, msg_id: str, campo: app_commands.Choice[str], novo_valor: str):
+async def editar_painel(
+    interaction: discord.Interaction, 
+    msg_id: str, 
+    novo_titulo: str = None, 
+    nova_descricao: str = None, 
+    novo_estoque: int = None, 
+    novo_preco: float = None, 
+    nova_foto: str = None
+):
     if not tem_permissao(interaction):
         await interaction.response.send_message(mensagens_sistema["sem_permissao"], ephemeral=True)
         return
@@ -175,117 +174,83 @@ async def editar_painel(interaction: discord.Interaction, msg_id: str, campo: ap
     try:
         msg_id_int = int(msg_id)
     except ValueError:
-        await interaction.response.send_message("❌ O ID da mensagem precisa ser um número.", ephemeral=True)
+        await interaction.response.send_message("❌ O ID da mensagem precisa ser numérico.", ephemeral=True)
         return
 
-    if msg_id_int not in paineis_produtos:
-        await interaction.response.send_message("❌ Painel não encontrado na memória.", ephemeral=True)
+    # Tenta achar a mensagem em qualquer canal do servidor atual
+    mensagem_alvo = None
+    canal_alvo = None
+    for channel in interaction.guild.text_channels:
+        try:
+            mensagem_alvo = await channel.fetch_message(msg_id_int)
+            canal_alvo = channel
+            break
+        except:
+            continue
+
+    if not mensagem_alvo:
+        await interaction.response.send_message("❌ Não achei nenhuma mensagem com esse ID neste servidor.", ephemeral=True)
         return
-        
-    p_info = paineis_produtos[msg_id_int]
-    chave = campo.value
+
+    if not mensagem_alvo.embeds:
+        await interaction.response.send_message("❌ Essa mensagem não possui um Embed para ser editado.", ephemeral=True)
+        return
+
+    embed_antigo = mensagem_alvo.embeds[0]
     
-    if chave == "estoque":
-        try: 
-            p_info["estoque"] = int(novo_valor)
-        except ValueError: 
-            await interaction.response.send_message("❌ Estoque precisa ser um número inteiro.", ephemeral=True)
-            return
-    elif chave == "preco":
-        try: 
-            p_info["preco"] = float(novo_valor.replace(",", "."))
-        except ValueError: 
-            await interaction.response.send_message("❌ Preço precisa ser número.", ephemeral=True)
-            return
-    elif chave == "foto":
-        p_info["foto"] = novo_valor if novo_valor.lower() != "nenhuma" else None
+    # Prepara os novos dados mantendo os antigos caso não sejam informados
+    titulo = novo_titulo if novo_titulo is not None else embed_antigo.title
+    descricao = nova_descricao if nova_descricao is not None else embed_antigo.description
+    
+    # Atualiza o registro interno se for um painel conhecido
+    if msg_id_int in paineis_produtos:
+        p_info = paineis_produtos[msg_id_int]
+        if novo_titulo is not None: p_info["titulo"] = novo_titulo
+        if nova_descricao is not None: p_info["descricao"] = nova_descricao
+        if novo_estoque is not None: p_info["estoque"] = novo_estoque
+        if novo_preco is not None: p_info["preco"] = novo_preco
+        if nova_foto is not None: p_info["foto"] = nova_foto if nova_foto.lower() != "nenhuma" else None
+    
+    # Reconstrói o embed mantendo a estrutura original limpa
+    embed_novo = discord.Embed(title=titulo, description=descricao, color=embed_antigo.color or discord.Color.blue())
+    
+    # Procura campos de estoque e preço anteriores se existirem
+    estoque_atual = novo_estoque
+    preco_atual = novo_preco
+    
+    for field in embed_antigo.fields:
+        if "Estoque" in field.name and estoque_atual is None:
+            try: estoque_atual = int(''.filter(str.isdigit, field.value))
+            except: pass
+        elif "Valor" in field.name and preco_atual is None:
+            pass # Mantém lógica limpa
+
+    # Se estiver no dicionário de painéis, puxa os valores consolidados dele
+    if msg_id_int in paineis_produtos:
+        p_info = paineis_produtos[msg_id_int]
+        embed_novo.add_field(name="📦 Estoque", value=f"`{p_info['estoque']}` disponíveis", inline=True)
+        embed_novo.add_field(name="💵 Valor Unitário", value=f"R$ `{p_info['preco']:.2f}`", inline=True)
+        if p_info["foto"]:
+            embed_novo.set_image(url=p_info["foto"])
     else:
-        p_info[chave] = novo_valor
-        
-    await atualizar_embed_painel_especifico(interaction.guild, msg_id_int)
-    await interaction.response.send_message(f"✅ Alteração efetuada com sucesso no campo `{campo.name}`!", ephemeral=True)
+        for field in embed_antigo.fields:
+            embed_novo.add_field(name=field.name, value=field.value, inline=field.inline)
+        if nova_foto:
+            embed_novo.set_image(url=nova_foto if nova_foto.lower() != "nenhuma" else None)
+        elif embed_antigo.image:
+            embed_novo.set_image(url=embed_antigo.image.url)
 
-# ================= COMANDO: COMPRA FAKE =================
-
-@bot.tree.command(name="compra_fake", description="Gera um anúncio de compra aprovada FAKE.")
-async def compra_fake(interaction: discord.Interaction, usuario: discord.User, produto: str, quantidade: int, valor_pago: float):
-    if not tem_permissao(interaction):
-        await interaction.response.send_message(mensagens_sistema["sem_permissao"], ephemeral=True)
-        return
-
-    if not canal_aprovadas_id:
-        await interaction.response.send_message("❌ Canal de aprovadas não configurado. Use /set_canal_aprovadas.", ephemeral=True)
-        return
-
-    c_aprovadas = interaction.guild.get_channel(canal_aprovadas_id)
-    avatar_url = usuario.display_avatar.url if usuario.avatar else bot.user.display_avatar.url
-
-    embed_grande = discord.Embed(
-        title=mensagens_sistema["embed_aprovada_titulo"],
-        description=(
-            f"Agradecemos pela preferência, {usuario.mention}!\n\n"
-            f"🛒 **Resumo da Compra:**\n"
-            f"📦 **Produto:** `{produto}`\n"
-            f"🔢 **Quantidade:** `{quantidade}x`\n"
-            f"💸 **Valor Pago:** R$ `{valor_pago:.2f}`"
-        ),
-        color=discord.Color.brand_green(),
-        timestamp=datetime.now()
-    )
-    embed_grande.set_author(name=f"Cliente: {usuario.name}", icon_url=avatar_url)
-    embed_grande.set_thumbnail(url=avatar_url)
-    
-    await c_aprovadas.send(embed=embed_grande)
-    await interaction.response.send_message("✅ Embed de compra fake despachado.", ephemeral=True)
-
-# ================= COMANDO DE RENDIMENTO =================
-
-@bot.tree.command(name="rendimento", description="Exibe o painel financeiro.")
-async def rendimento(interaction: discord.Interaction):
-    if not tem_permissao(interaction):
-        await interaction.response.send_message(mensagens_sistema["sem_permissao"], ephemeral=True)
-        return
-
-    agora = datetime.now()
-    total_faturamento = sum(v["valor"] for v in historico_vendas)
-    total_vendas = len(historico_vendas)
-    total_itens = sum(v["qtd"] for v in historico_vendas)
-    faturamento_hoje = sum(v["valor"] for v in historico_vendas if v["data"].date() == agora.date())
-    faturamento_mes = sum(v["valor"] for v in historico_vendas if v["data"].month == agora.month and v["data"].year == agora.year)
-
-    produtos_contagem = {}
-    for v in historico_vendas:
-        prod = v["produto"]
-        produtos_contagem[prod] = produtos_contagem.get(prod, 0) + v["qtd"]
-    produto_mais_vendido = max(produtos_contagem, key=produtos_contagem.get) if produtos_contagem else "Nenhum"
-
-    embed = discord.Embed(title="📊 PAINEL DE RENDIMENTO FINANCEIRO", color=discord.Color.gold(), timestamp=agora)
-    embed.add_field(name="💰 Faturamento Total", value=f"R$ `{total_faturamento:.2f}`", inline=True)
-    embed.add_field(name="📅 Faturamento Hoje", value=f"R$ `{faturamento_hoje:.2f}`", inline=True)
-    embed.add_field(name="🗓️ Faturamento Mês", value=f"R$ `{faturamento_mes:.2f}`", inline=True)
-    embed.add_field(name="📦 Vendas Aprovadas", value=f"`{total_vendas}` vendas", inline=True)
-    embed.add_field(name="🔢 Itens Entregues", value=f"`{total_itens}` unidades", inline=True)
-    embed.add_field(name="🏆 Produto Mais Vendido", value=f"`{produto_mais_vendido}`", inline=False)
-
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-# ================= COMANDOS DE GERENCIAMENTO =================
-
-@bot.tree.command(name="enviar_pv", description="Manda uma mensagem direta no PV do usuário.")
-async def enviar_pv(interaction: discord.Interaction, usuario: discord.User, mensagem: str):
-    if not tem_permissao(interaction): return
     try:
-        await usuario.send(mensagem)
-        await interaction.response.send_message(f"✅ PV enviado para {usuario.mention}!", ephemeral=True)
-    except:
-        await interaction.response.send_message(f"❌ DM do {usuario.mention} tá fechada.", ephemeral=True)
+        if msg_id_int in paineis_produtos:
+            await mensagem_alvo.edit(embed=embed_novo, view=BotaoAbrirCarrinho())
+        else:
+            await mensagem_alvo.edit(embed=embed_novo)
+            
+        await interaction.response.send_message("✅ Mensagem/Painel editado com sucesso na hora!", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Erro ao editar a mensagem: {e}", ephemeral=True)
 
-@bot.tree.command(name="add_dono", description="Adiciona permissão total a um usuário.")
-async def add_dono(interaction: discord.Interaction, usuario: discord.User):
-    if not tem_permissao(interaction): return
-    if usuario.id not in donos_permitidos:
-        donos_permitidos.append(usuario.id)
-        await interaction.response.send_message(f"✅ {usuario.mention} agora tem admin do bot.", ephemeral=True)
+# ================= DEMAIS COMANDOS ESSENCIAIS =================
 
 @bot.tree.command(name="criar_painel", description="Cria um painel de vendas no chat.")
 async def criar_painel(interaction: discord.Interaction, canal: discord.TextChannel, titulo: str, descricao: str, estoque: int, preco: float, foto: str = None):
@@ -298,28 +263,85 @@ async def criar_painel(interaction: discord.Interaction, canal: discord.TextChan
 
     msg = await canal.send(embed=embed, view=BotaoAbrirCarrinho())
     paineis_produtos[msg.id] = {"titulo": titulo, "descricao": descricao, "estoque": estoque, "preco": preco, "foto": foto, "canal_id": canal.id}
-    await interaction.response.send_message(f"✅ Painel criado. Pra mudar, usa /editar_painel {msg.id}", ephemeral=True)
+    await interaction.response.send_message(f"✅ Painel criado com ID `{msg.id}`.", ephemeral=True)
 
-@bot.tree.command(name="config_pix", description="Configura a chave PIX geral do sistema.")
+@bot.tree.command(name="compra_fake", description="Gera um anúncio de compra aprovada FAKE.")
+async def compra_fake(interaction: discord.Interaction, usuario: discord.User, produto: str, quantidade: int, valor_pago: float):
+    if not tem_permissao(interaction): return
+    if not canal_aprovadas_id:
+        return await interaction.response.send_message("❌ Canal de aprovadas não configurado.", ephemeral=True)
+
+    c_aprovadas = interaction.guild.get_channel(canal_aprovadas_id)
+    avatar_url = usuario.display_avatar.url if usuario.avatar else bot.user.display_avatar.url
+
+    embed_grande = discord.Embed(
+        title=mensagens_sistema["embed_aprovada_titulo"],
+        description=f"Agradecemos pela preferência, {usuario.mention}!\n\n🛒 **Resumo da Compra:**\n📦 **Produto:** `{produto}`\n🔢 **Quantidade:** `{quantidade}x`\n💸 **Valor Pago:** R$ `{valor_pago:.2f}`",
+        color=discord.Color.brand_green(),
+        timestamp=datetime.now()
+    )
+    embed_grande.set_author(name=f"Cliente: {usuario.name}", icon_url=avatar_url)
+    embed_grande.set_thumbnail(url=avatar_url)
+    
+    await c_aprovadas.send(embed=embed_grande)
+    await interaction.response.send_message("✅ Compra fake despachada.", ephemeral=True)
+
+@bot.tree.command(name="rendimento", description="Exibe o painel financeiro.")
+async def rendimento(interaction: discord.Interaction):
+    if not tem_permissao(interaction): return
+
+    agora = datetime.now()
+    total_faturamento = sum(v["valor"] for v in historico_vendas)
+    total_vendas = len(historico_vendas)
+    total_itens = sum(v["qtd"] for v in historico_vendas)
+    faturamento_hoje = sum(v["valor"] for v in historico_vendas if v["data"].date() == agora.date())
+    faturamento_mes = sum(v["valor"] for v in historico_vendas if v["data"].month == agora.month and v["data"].year == agora.year)
+
+    embed = discord.Embed(title="📊 PAINEL DE RENDIMENTO FINANCEIRO", color=discord.Color.gold(), timestamp=agora)
+    embed.add_field(name="💰 Faturamento Total", value=f"R$ `{total_faturamento:.2f}`", inline=True)
+    embed.add_field(name="📅 Faturamento Hoje", value=f"R$ `{faturamento_hoje:.2f}`", inline=True)
+    embed.add_field(name="🗓️ Faturamento Mês", value=f"R$ `{faturamento_mes:.2f}`", inline=True)
+    embed.add_field(name="📦 Vendas Aprovadas", value=f"`{total_vendas}` vendas", inline=True)
+    embed.add_field(name="🔢 Itens Entregues", value=f"`{total_itens}` unidades", inline=True)
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="enviar_pv", description="Manda uma mensagem direta no PV do usuário.")
+async def enviar_pv(interaction: discord.Interaction, usuario: discord.User, mensagem: str):
+    if not tem_permissao(interaction): return
+    try:
+        await usuario.send(mensagem)
+        await interaction.response.send_message(f"✅ PV enviado para {usuario.mention}!", ephemeral=True)
+    except:
+        await interaction.response.send_message(f"❌ DM fechada.", ephemeral=True)
+
+@bot.tree.command(name="add_dono", description="Adiciona permissão total a um usuário.")
+async def add_dono(interaction: discord.Interaction, usuario: discord.User):
+    if not tem_permissao(interaction): return
+    if usuario.id not in donos_permitidos:
+        donos_permitidos.append(usuario.id)
+        await interaction.response.send_message(f"✅ {usuario.mention} agora é admin.", ephemeral=True)
+
+@bot.tree.command(name="config_pix", description="Configura a chave PIX geral.")
 async def config_pix(interaction: discord.Interaction, chave: str):
     global chave_pix_global
     if not tem_permissao(interaction): return
     chave_pix_global = chave
     await interaction.response.send_message(f"✅ Chave PIX: `{chave}`", ephemeral=True)
 
-@bot.tree.command(name="logs", description="Define o canal onde os logs vão cair.")
+@bot.tree.command(name="logs", description="Define o canal de logs.")
 async def config_logs(interaction: discord.Interaction, canal: discord.TextChannel):
     global canal_logs_id
     if not tem_permissao(interaction): return
     canal_logs_id = canal.id
-    await interaction.response.send_message(f"📢 Logs vão pro canal {canal.mention}.", ephemeral=True)
+    await interaction.response.send_message(f"📢 Logs definidos para {canal.mention}.", ephemeral=True)
 
-@bot.tree.command(name="set_canal_aprovadas", description="Define onde as compras aprovadas aparecem publicamente.")
+@bot.tree.command(name="set_canal_aprovadas", description="Define onde as compras aprovadas aparecem.")
 async def set_canal_aprovadas(interaction: discord.Interaction, canal: discord.TextChannel):
     global canal_aprovadas_id
     if not tem_permissao(interaction): return
     canal_aprovadas_id = canal.id
-    await interaction.response.send_message(f"🎉 Aprovadas vão pro canal {canal.mention}", ephemeral=True)
+    await interaction.response.send_message(f"🎉 Canal de aprovadas definido para {canal.mention}", ephemeral=True)
 
 @bot.tree.command(name="mandar_pix", description="Despacha os dados do PIX no carrinho.")
 async def mandar_pix(interaction: discord.Interaction, chave: str = None):
@@ -356,7 +378,18 @@ async def aprovar(interaction: discord.Interaction, produto: str):
 
     if panel_id in paineis_produtos:
         paineis_produtos[panel_id]["estoque"] = max(0, paineis_produtos[panel_id]["estoque"] - qtd)
-        await atualizar_embed_painel_especifico(interaction.guild, panel_id)
+        # Atualiza o embed do painel automaticamente
+        try:
+            canal_p = interaction.guild.get_channel(paineis_produtos[panel_id]["canal_id"])
+            if canal_p:
+                msg_p = await canal_p.fetch_message(panel_id)
+                p_info = paineis_produtos[panel_id]
+                emb_up = discord.Embed(title=p_info["titulo"], description=p_info["descricao"], color=discord.Color.blue())
+                emb_up.add_field(name="📦 Estoque", value=f"`{p_info['estoque']}` disponíveis", inline=True)
+                emb_up.add_field(name="💵 Valor Unitário", value=f"R$ `{p_info['preco']:.2f}`", inline=True)
+                if p_info["foto"]: emb_up.set_image(url=p_info["foto"])
+                await msg_p.edit(embed=emb_up, view=BotaoAbrirCarrinho())
+        except: pass
 
     carrinhos_aprovados.add(canal_id)
     await interaction.response.send_message(f"✅ Venda validada. R$ `{total_venda:.2f}` pro caixa.", ephemeral=True)
@@ -388,12 +421,6 @@ async def aprovar(interaction: discord.Interaction, produto: str):
                 except: pass
             asyncio.create_task(ping_feedback())
 
-    embed_log = discord.Embed(title="💰 VENDA FINALIZADA", color=discord.Color.green(), timestamp=datetime.now())
-    embed_log.add_field(name="Cliente", value=cliente.mention)
-    embed_log.add_field(name="Produto", value=f"`{nome_produto}`")
-    embed_log.add_field(name="Total", value=f"R$ `{total_venda:.2f}`")
-    await enviar_log(interaction.guild, embed_log)
-
     async def fechar_carrinho():
         await asyncio.sleep(300)
         try:
@@ -403,13 +430,7 @@ async def aprovar(interaction: discord.Interaction, produto: str):
         except: pass
     asyncio.create_task(fechar_carrinho())
 
-# ================= CLASSES DE BOTÕES E INTERFACES =================
-
-class ViewMensagemAutomatica(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-    @discord.ui.button(label="Mensagem Automática", style=discord.ButtonStyle.secondary, disabled=True, custom_id="btn_auto_disable")
-    async def btn_auto(self, i: discord.Interaction, b: discord.ui.Button): pass
+# ================= INTERFACES E BOTÕES =================
 
 class BotaoAbrirCarrinho(discord.ui.View):
     def __init__(self):
@@ -418,9 +439,6 @@ class BotaoAbrirCarrinho(discord.ui.View):
 
     @discord.ui.button(label="🛒 Comprar", style=discord.ButtonStyle.green, custom_id="btn_abrir")
     async def btn_compra(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if status_sistema == "upando":
-            return await interaction.response.send_message(mensagens_sistema["bot_travado"], ephemeral=True)
-
         panel_id = interaction.message.id
         painel_info = paineis_produtos.get(panel_id)
 
@@ -444,10 +462,6 @@ class BotaoAbrirCarrinho(discord.ui.View):
         await cc.send("@everyone")
         emb = discord.Embed(title=mensagens_sistema["embed_carrinho_titulo"], description=formatar_texto(mensagens_sistema["embed_carrinho_desc"], produto_nome=nome, qtd=1), color=discord.Color.light_grey())
         await cc.send(embed=emb, view=InterfaceCarrinho(interaction.user.id))
-
-        elog = discord.Embed(title="🛒 CARRINHO ABERTO", color=discord.Color.blue(), timestamp=datetime.now())
-        elog.add_field(name="Cliente", value=interaction.user.mention); elog.add_field(name="Produto", value=f"`{nome}`")
-        await enviar_log(guild, elog)
 
         carrinhos_ativos_alerta.add(cc.id)
         asyncio.create_task(alertar_dono_no_pv(cc.id, cc.name))
@@ -508,9 +522,6 @@ class InterfaceCarrinho(discord.ui.View):
             except: pass
             return
 
-        elog = discord.Embed(title="❌ CANCELADO", color=discord.Color.red(), timestamp=datetime.now())
-        elog.add_field(name="User", value=interaction.user.mention)
-        await enviar_log(interaction.guild, elog)
         await interaction.response.send_message(mensagens_sistema["carrinho_cancelado"])
         await asyncio.sleep(2)
         try: await interaction.channel.delete()
@@ -519,4 +530,3 @@ class InterfaceCarrinho(discord.ui.View):
 if __name__ == "__main__":
     manter_online()
     bot.run(TOKEN_BOT)
-
