@@ -58,7 +58,6 @@ class MeuBot(discord.Client):
         print("Sincronizando com Firebase...")
         global configs, paineis_produtos, historico_vendas
         
-        # Baixa os dados da nuvem pra memória ao iniciar
         db_configs = await ler_fb("configs")
         db_paineis = await ler_fb("paineis")
         db_vendas = await ler_fb("vendas")
@@ -76,15 +75,20 @@ def tem_permissao(interaction: discord.Interaction):
     return interaction.user.id in donos_permitidos
 
 async def enviar_log(guild, embed):
-    if configs.get("canal_logs"):
-        canal = guild.get_channel(configs["canal_logs"])
-        if canal:
-            try: await canal.send(embed=embed)
-            except: pass
+    canal_id = configs.get("canal_logs")
+    if canal_id:
+        try:
+            canal = guild.get_channel(int(canal_id))
+            if not canal:
+                canal = await guild.fetch_channel(int(canal_id))
+            if canal:
+                await canal.send(embed=embed)
+        except Exception as e:
+            print(f"Erro ao enviar log: {e}")
 
 @bot.event
 async def on_ready():
-    print(f"🟢 {bot.user.name} online, otimizado e rodando Firebase.")
+    print(f"🟢 {bot.user.name} online, bruto e rodando Firebase.")
 
 @bot.event
 async def on_message(message):
@@ -191,7 +195,6 @@ async def add_dono(interaction: discord.Interaction, usuario: discord.User):
 async def rendimento(interaction: discord.Interaction):
     if not tem_permissao(interaction): return
     agora = datetime.now()
-    # Converte string ISO de volta pra data
     historico_valid = [{"valor": v["valor"], "qtd": v["qtd"], "data": datetime.fromisoformat(v["data"])} for v in historico_vendas if "data" in v]
     
     total_faturamento = sum(v["valor"] for v in historico_valid)
@@ -216,7 +219,6 @@ async def criar_painel(interaction: discord.Interaction, canal: discord.TextChan
 
     msg = await canal.send(embed=embed, view=BotaoAbrirCarrinho())
     
-    # Salva na memória e no Firebase
     dados_painel = {"titulo": titulo, "descricao": descricao, "estoque": estoque, "preco": preco, "foto": foto, "canal_id": canal.id}
     paineis_produtos[msg.id] = dados_painel
     asyncio.create_task(gravar_fb(f"paineis/{msg.id}", dados_painel))
@@ -238,7 +240,6 @@ async def editar_painel(interaction: discord.Interaction, msg_id: str, novo_titu
 
     asyncio.create_task(gravar_fb(f"paineis/{msg_id_int}", p_info))
     
-    # Atualiza no Discord
     try:
         canal = interaction.guild.get_channel(p_info["canal_id"])
         msg = await canal.fetch_message(msg_id_int)
@@ -279,17 +280,15 @@ async def aprovar(interaction: discord.Interaction, produto: str):
     venda_dados = {"valor": total_venda, "qtd": info["qtd"], "produto": info["produto_nome"], "data": datetime.now().isoformat()}
     historico_vendas.append(venda_dados)
     
-    # ID unico pra venda
     venda_id = f"venda_{int(datetime.now().timestamp())}_{info['cliente_id']}"
     asyncio.create_task(gravar_fb(f"vendas/{venda_id}", venda_dados))
 
-    # Baixa o Estoque (Memória + Firebase)
+    # Baixa o Estoque
     panel_id = info["panel_id"]
     if panel_id in paineis_produtos:
         paineis_produtos[panel_id]["estoque"] = max(0, paineis_produtos[panel_id]["estoque"] - info["qtd"])
         asyncio.create_task(gravar_fb(f"paineis/{panel_id}/estoque", paineis_produtos[panel_id]["estoque"]))
         
-        # Edita a mensagem do bot original
         try:
             canal_p = interaction.guild.get_channel(paineis_produtos[panel_id]["canal_id"])
             msg_p = await canal_p.fetch_message(panel_id)
@@ -302,18 +301,32 @@ async def aprovar(interaction: discord.Interaction, produto: str):
         except: pass
 
     carrinhos_aprovados.add(canal_id)
-    await interaction.response.send_message("✅ Venda Aprovada e Registrada no DB.", ephemeral=True)
-    await interaction.channel.send("🎉 **COMPRA APROVADA!!** O carrinho fecha em 5m.")
+    await interaction.response.send_message("✅ Venda validada.", ephemeral=True)
+    
+    # MENSAGEM ALEGRE E ANIMADA NO CARRINHO
+    await interaction.channel.send("🥳 **COMPRA APROVADA COM SUCESSO!** 🎉\nMuito obrigado por fortalecer! Seu produto já foi enviado na DM, vai lá conferir. Tamo junto! 🚀\n⏳ *O carrinho vai fechar sozinho em 5 minutinhos.*")
 
-    await enviar_log(interaction.guild, discord.Embed(title="🎉 Aprovada", description=f"Total: R$ {total_venda:.2f}", color=discord.Color.green()))
+    await enviar_log(interaction.guild, discord.Embed(title="🎉 Compra Aprovada", description=f"**Canal:** {interaction.channel.name}\n**Cliente:** {cliente.mention}\n**Total:** R$ `{total_venda:.2f}`", color=discord.Color.green(), timestamp=datetime.now()))
 
-    try: await cliente.send(f"🎁 **Sua compra foi aprovada!**\n📦 Produto: `{produto}`")
+    try: await cliente.send(f"🎁 **Sua compra foi aprovada!**\n📦 Aqui está seu produto:\n`{produto}`")
     except: await interaction.channel.send(f"⚠️ {cliente.mention} DM Fechada!")
 
+    # EMBED NO CANAL DE APROVADAS EXATAMENTE COMO PEDIU
     if configs.get("canal_aprovadas"):
-        c_aprovadas = interaction.guild.get_channel(configs["canal_aprovadas"])
+        c_aprovadas = interaction.guild.get_channel(int(configs["canal_aprovadas"]))
         if c_aprovadas:
-            embed_apv = discord.Embed(title="🎉 COMPRA REALIZADA!", description=f"📦 Produto: `{info['produto_nome']}`\n💸 R$ `{total_venda:.2f}`", color=discord.Color.brand_green())
+            avatar = cliente.display_avatar.url if cliente.avatar else bot.user.display_avatar.url
+            
+            desc_apv = (
+                f"👤 **Cliente:** {cliente.mention}\n\n"
+                f"📦 **Produto:** `{info['produto_nome']}`\n\n"
+                f"🔢 **Quantidade:** `{info['qtd']}x`\n\n"
+                f"♻️ **VALOR PAGO** `{total_venda:.2f}$`\n\n"
+                f"✨ *O produto foi entregue automaticamente com segurança via Mensagem Direta (DM)!*"
+            )
+            
+            embed_apv = discord.Embed(title="🎉 COMPRA REALIZADA COM SUCESSO!", description=desc_apv, color=discord.Color.brand_green())
+            embed_apv.set_thumbnail(url=avatar)
             await c_aprovadas.send(embed=embed_apv)
 
     async def fechar_carrinho():
@@ -343,6 +356,10 @@ class BotaoAbrirCarrinho(discord.ui.View):
         cc = await guild.create_text_channel(name=f"🛒-carrinho-{interaction.user.name}", category=interaction.channel.category, overwrites=overwrites)
         await interaction.response.send_message(f"✅ Carrinho: {cc.mention}", ephemeral=True)
 
+        # LOG DE CARRINHO ABERTO
+        embed_log = discord.Embed(title="🛒 Carrinho Aberto", description=f"O usuário {interaction.user.mention} abriu o carrinho {cc.mention}.", color=discord.Color.blue(), timestamp=datetime.now())
+        await enviar_log(guild, embed_log)
+
         nome, preco = (painel_info["titulo"], painel_info["preco"]) if painel_info else ("Produto", 0.0)
         dados_carrinhos[cc.id] = {"cliente_id": interaction.user.id, "qtd": 1, "panel_id": panel_id, "produto_nome": nome, "preco": preco}
 
@@ -363,6 +380,11 @@ class InterfaceCarrinho(discord.ui.View):
     @discord.ui.button(label="CANCELA", style=discord.ButtonStyle.danger, custom_id="c_canc")
     async def btn_canc(self, interaction: discord.Interaction, button: discord.ui.Button):
         carrinhos_ativos_alerta.discard(interaction.channel.id)
+        
+        # LOG DE CARRINHO FECHADO/CANCELADO
+        embed_log = discord.Embed(title="❌ Carrinho Cancelado", description=f"O carrinho **{interaction.channel.name}** foi fechado por {interaction.user.mention}.", color=discord.Color.red(), timestamp=datetime.now())
+        await enviar_log(interaction.guild, embed_log)
+        
         await interaction.response.send_message("❌ Fechando...")
         await asyncio.sleep(2)
         try: await interaction.channel.delete()
@@ -371,3 +393,4 @@ class InterfaceCarrinho(discord.ui.View):
 if __name__ == "__main__":
     manter_online()
     bot.run(TOKEN_BOT)
+
