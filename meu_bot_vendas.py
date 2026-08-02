@@ -64,7 +64,7 @@ mensagens_sistema = {
     "apenas_comprador": "❌ Apenas quem abriu o carrinho pode mudar isso.",
     "bot_travado": "❌ **Contas sendo upadas**, aguarde a finalização!",
     "sem_estoque": "❌ Produto sem estoque no momento.",
-    "compra_aprovada": "🎉 **COMPRA APROVADA!!** Seu produto foi enviado no seu PV/DM! Obrigado pela preferência! ✨\n\n⏳ *O carrinho fechará automaticamente em 5 minutos.*",
+    "compra_aprovada": "🎉 **COMPRA APROVADA!!** Seu produto foi enviado no seu PV/DM! Obrigado pela preferência!\n\n⏳ *O carrinho fechará automaticamente em 5 minutos.*",
     "carrinho_cancelado": "❌ Cancelando e fechando...",
     "pix_enviado": "✅ PIX enviado!",
     "compra_ja_realizada": "🎉 **COMPRA REALIZADA COM SUCESSO!** Fechando carrinho...",
@@ -130,7 +130,7 @@ async def atualizar_embed_painel_especifico(guild, msg_id):
 
 @bot.event
 async def on_ready():
-    print(f"🟢 {bot.user.name} online com sistema de edição de painel e embed fake!")
+    print(f"🟢 {bot.user.name} online. Todos os comandos integrados.")
 
 @bot.event
 async def on_message(message):
@@ -176,6 +176,8 @@ async def compra_fake(interaction: discord.Interaction, usuario: discord.User, p
         await interaction.response.send_message("❌ Canal de aprovações não encontrado no servidor.", ephemeral=True)
         return
 
+    avatar_url = usuario.display_avatar.url if usuario.avatar else bot.user.display_avatar.url
+
     embed_grande = discord.Embed(
         title="🎉 COMPRA APROVADA!",
         description=(
@@ -183,14 +185,14 @@ async def compra_fake(interaction: discord.Interaction, usuario: discord.User, p
             f"🛒 **Resumo da Compra:**\n"
             f"📦 **Produto:** `{produto}`\n"
             f"🔢 **Quantidade:** `{quantidade}x`\n"
-            f"💸 **Valor Pago:** R$ `{valor_pago:.2f}`\n\n"
-            f"✨ *O produto foi entregue automaticamente e com segurança na DM!*"
+            f"💸 **Valor Pago:** R$ `{valor_pago:.2f}`"
         ),
         color=discord.Color.brand_green(),
         timestamp=datetime.now()
     )
-    embed_grande.set_thumbnail(url=usuario.display_avatar.url if usuario.avatar else bot.user.display_avatar.url)
-    embed_grande.set_footer(text="Loja Confiável • Entrega Automática", icon_url=bot.user.display_avatar.url)
+    embed_grande.set_author(name=f"Cliente: {usuario.name}", icon_url=avatar_url)
+    embed_grande.set_thumbnail(url=avatar_url)
+    embed_grande.set_footer(text="Compra Aprovada", icon_url=bot.user.display_avatar.url)
 
     await c_aprovadas.send(embed=embed_grande)
     await interaction.response.send_message("✅ Embed de compra fake enviado com sucesso!", ephemeral=True)
@@ -299,6 +301,31 @@ async def rendimento(interaction: discord.Interaction):
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+# ================= COMANDO ENVIAR PV =================
+
+@bot.tree.command(name="enviar_pv", description="Envia uma mensagem direta no PV de um usuário específico.")
+async def enviar_pv(interaction: discord.Interaction, usuario: discord.User, mensagem: str):
+    if not tem_permissao(interaction):
+        await interaction.response.send_message(mensagens_sistema["sem_permissao"], ephemeral=True)
+        return
+
+    try:
+        await usuario.send(mensagem)
+        await interaction.response.send_message(f"✅ Mensagem enviada no PV de {usuario.mention}!", ephemeral=True)
+    except Exception:
+        await interaction.response.send_message(f"❌ DM fechada para {usuario.mention}.", ephemeral=True)
+
+# ================= COMANDO ADICIONAR DONO =================
+
+@bot.tree.command(name="add_dono", description="Adiciona permissão a um usuário.")
+async def add_dono(interaction: discord.Interaction, usuario: discord.User):
+    if not tem_permissao(interaction):
+        await interaction.response.send_message(mensagens_sistema["sem_permissao"], ephemeral=True)
+        return
+    if usuario.id not in donos_permitidos:
+        donos_permitidos.append(usuario.id)
+        await interaction.response.send_message(f"✅ {usuario.mention} agora possui permissão!", ephemeral=True)
+
 # ================= DEMAIS COMANDOS =================
 
 @bot.tree.command(name="criar_painel", description="Cria um novo painel de vendas independente.")
@@ -399,6 +426,7 @@ async def aprovar(interaction: discord.Interaction, produto: str):
     if canal_aprovadas_id:
         c_aprovadas = interaction.guild.get_channel(canal_aprovadas_id)
         if c_aprovadas:
+            avatar_url = cliente.display_avatar.url if cliente.avatar else bot.user.display_avatar.url
             embed_grande = discord.Embed(
                 title="🎉 COMPRA APROVADA!",
                 description=(
@@ -406,14 +434,14 @@ async def aprovar(interaction: discord.Interaction, produto: str):
                     f"🛒 **Resumo da Compra:**\n"
                     f"📦 **Produto:** `{nome_produto}`\n"
                     f"🔢 **Quantidade:** `{qtd_comprada}x`\n"
-                    f"💸 **Valor Pago:** R$ `{total_venda:.2f}`\n\n"
-                    f"✨ *O produto foi entregue automaticamente e com segurança na DM!*"
+                    f"💸 **Valor Pago:** R$ `{total_venda:.2f}`"
                 ),
                 color=discord.Color.brand_green(),
                 timestamp=datetime.now()
             )
-            embed_grande.set_thumbnail(url=cliente.display_avatar.url if cliente.avatar else bot.user.display_avatar.url)
-            embed_grande.set_footer(text="Loja Confiável • Entrega Automática", icon_url=bot.user.display_avatar.url)
+            embed_grande.set_author(name=f"Cliente: {cliente.name}", icon_url=avatar_url)
+            embed_grande.set_thumbnail(url=avatar_url)
+            embed_grande.set_footer(text="Compra Aprovada", icon_url=bot.user.display_avatar.url)
 
             await c_aprovadas.send(embed=embed_grande)
 
