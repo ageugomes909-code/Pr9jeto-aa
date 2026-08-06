@@ -33,7 +33,7 @@ async def deletar_fb(caminho):
             return await resp.json()
 
 # ================= VARIÁVEIS DE MEMÓRIA (CACHE) =================
-donos_permitidos = [1410272734012772524]
+donos_permitidos = [985441586898939904]
 configs = {"canal_logs": None, "canal_aprovadas": None, "chave_pix": "Não configurada"}
 paineis_produtos = {}  
 historico_vendas = []  
