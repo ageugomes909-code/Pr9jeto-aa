@@ -38,7 +38,7 @@ bot = MeuBot()
 
 # --- BANCO DE DADOS EM MEMÓRIA ---
 
-donos_permitidos = [985441586898939904]
+donos_permitidos = [1534995039078580324]
 status_sistema = "normal"
 canal_logs_id = None
 canal_aprovadas_id = None
